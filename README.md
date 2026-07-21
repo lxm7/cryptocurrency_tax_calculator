@@ -1,4 +1,4 @@
-# crypto-tax-calc
+# Cryptocurrency CGT tax calculator
 
 UK crypto **Capital Gains Tax calculation and reporting aid** — turns a Kraken
 ledger export into per-tax-year gain/loss figures using HMRC share-matching
