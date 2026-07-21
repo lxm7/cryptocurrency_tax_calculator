@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# uv — note: uv.lock IS committed, do not ignore it
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# reference-script artifact
+.price_cache.json
+
+# node (arrives step 4)
+node_modules/
+.next/
+
+# build
+dist/
+build/
+*.egg-info/
+
+# OS
+.DS_Store

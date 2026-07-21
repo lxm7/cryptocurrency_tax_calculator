@@ -1,0 +1,41 @@
+[project]
+name = "taxcalc"
+version = "0.1.0"
+description = "UK crypto CGT calculation and reporting aid — deterministic engine + API"
+requires-python = ">=3.13"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/taxcalc"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# Global strict for now — the codebase is just the engine. When web/tasks/ingest
+# arrive (step 4) they get per-module overrides that relax specific checks;
+# engine/ and pricing/ stay strict permanently.
+[tool.mypy]
+python_version = "3.13"
+strict = true
