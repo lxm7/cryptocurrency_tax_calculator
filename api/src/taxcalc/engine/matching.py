@@ -5,8 +5,9 @@ Batch semantics: the engine sorts internally, so input order never changes the
 result. Decimal throughout — no floats, no epsilon fudging. Full precision is
 kept here; rounding happens only at the reporting boundary.
 
-Only the Section 104 pool path is implemented so far. Same-day, 30-day and
-pool-short handling arrive with the tests that demand them.
+Same-day and Section 104 pool paths are implemented. The 30-day (bed-and-
+breakfast) rule and pool-short handling arrive with the tests that demand them;
+the priority pipeline already has a labelled slot for the 30-day phase.
 """
 
 from __future__ import annotations
@@ -92,6 +93,117 @@ class MatchOutcome:
     flags: tuple[Flag, ...]
 
 
+_THIRTY_DAYS = dt.timedelta(days=30)
+
+
+@dataclass
+class _Lot:
+    """Internal mutable working lot. HMRC treats all acquisitions on one day as a
+    single acquisition, so same-date acquisitions are collapsed into one lot."""
+
+    date: dt.date
+    quantity: Decimal
+    cost_gbp: Decimal
+
+
+@dataclass
+class _Work:
+    """A disposal being worked through the priority pipeline: how much is still
+    unmatched and the matches accumulated so far, in priority order."""
+
+    disposal: Disposal
+    remaining: Decimal
+    matches: list[Match]
+
+
+def _collapse_by_date(acqs: list[Acquisition]) -> list[_Lot]:
+    """One lot per acquisition date, oldest first, costs summed (s105 pooling)."""
+    by_date: dict[dt.date, _Lot] = {}
+    for a in acqs:
+        lot = by_date.get(a.date)
+        if lot is None:
+            by_date[a.date] = _Lot(a.date, a.quantity, a.cost_gbp)
+        else:
+            lot.quantity += a.quantity
+            lot.cost_gbp += a.cost_gbp
+    return [by_date[d] for d in sorted(by_date)]
+
+
+def _take(lot: _Lot, quantity: Decimal) -> Decimal:
+    """Consume `quantity` from a lot, returning its apportioned cost. The lot's
+    remaining cost is reduced by subtraction so matched + remaining is conserved
+    exactly even when the split does not terminate (e.g. thirds)."""
+    cost = lot.cost_gbp * quantity / lot.quantity
+    lot.quantity -= quantity
+    lot.cost_gbp -= cost
+    return cost
+
+
+def _match_asset(
+    acqs: list[Acquisition],
+    disps: list[Disposal],
+) -> tuple[list[DisposalResult], PoolState]:
+    """Match one asset's disposals through the priority pipeline, returning the
+    per-disposal working and the pool carried forward.
+
+    Three passes over shared mutable lots, in strict HMRC priority. Each pass only
+    ever sees what earlier passes left, so the s104 pool is built from residual
+    stock — no acquisition is ever poured and then clawed back out.
+    """
+    asset = acqs[0].asset if acqs else disps[0].asset
+    lots = _collapse_by_date(acqs)  # one lot per date, oldest first
+    works = [_Work(d, d.quantity, []) for d in sorted(disps, key=lambda d: d.date)]
+
+    # Pass 1 — same-day (s105). Bind each disposal to the lot on its own day first,
+    # globally, so a same-day disposal always outranks an earlier disposal's 30-day
+    # claim on the same acquisition.
+    lot_by_date = {lot.date: lot for lot in lots}
+    for w in works:
+        lot = lot_by_date.get(w.disposal.date)
+        if lot is not None and w.remaining > _ZERO and lot.quantity > _ZERO:
+            qty = min(w.remaining, lot.quantity)
+            w.matches.append(Match(MatchRule.SAME_DAY, qty, _take(lot, qty)))
+            w.remaining -= qty
+
+    # Pass 2 — 30-day / bed-and-breakfast (s106A). Earliest disposal first; within
+    # each, acquisitions in (date, date+30] FIFO, matched at their own cost.
+    for w in works:
+        if w.remaining <= _ZERO:
+            continue
+        window_end = w.disposal.date + _THIRTY_DAYS
+        for lot in lots:  # oldest first → FIFO
+            if w.remaining <= _ZERO:
+                break
+            if lot.quantity > _ZERO and w.disposal.date < lot.date <= window_end:
+                qty = min(w.remaining, lot.quantity)
+                w.matches.append(Match(MatchRule.THIRTY_DAY, qty, _take(lot, qty)))
+                w.remaining -= qty
+
+    # Pass 3 — Section 104. Pour residual lots chronologically; each disposal draws
+    # its leftover from the pool as it stood on its date.
+    pool = _Lot(dt.date.min, _ZERO, _ZERO)
+    next_lot = 0  # lots[:next_lot] have been poured into the pool
+    for w in works:
+        while next_lot < len(lots) and lots[next_lot].date < w.disposal.date:
+            lot = lots[next_lot]
+            pool.quantity += lot.quantity
+            pool.cost_gbp += lot.cost_gbp
+            next_lot += 1
+        if w.remaining > _ZERO and pool.quantity > _ZERO:
+            qty = min(w.remaining, pool.quantity)
+            w.matches.append(Match(MatchRule.SECTION_104, qty, _take(pool, qty)))
+            w.remaining -= qty
+
+    # Carry forward the pool plus any residual stock never drawn on (same-day and
+    # 30-day leftovers, plus acquisitions after the last disposal).
+    for lot in lots[next_lot:]:
+        pool.quantity += lot.quantity
+        pool.cost_gbp += lot.cost_gbp
+
+    results = [DisposalResult(disposal=w.disposal, matches=tuple(w.matches)) for w in works]
+    return results, PoolState(asset=asset, quantity=pool.quantity, cost_gbp=pool.cost_gbp)
+
+
 def match_disposals(
     acquisitions: list[Acquisition],
     disposals: list[Disposal],
@@ -104,33 +216,8 @@ def match_disposals(
     for asset in assets:
         acqs = [a for a in acquisitions if a.asset == asset]
         disps = [d for d in disposals if d.asset == asset]
-
-        # Chronological pass; on a same-date tie, acquisitions land before disposals.
-        events: list[tuple[dt.date, int, Acquisition | Disposal]] = [
-            (a.date, 0, a) for a in acqs
-        ] + [(d.date, 1, d) for d in disps]
-        events.sort(key=lambda e: (e[0], e[1]))
-
-        pool_qty = _ZERO
-        pool_cost = _ZERO
-        for _, kind, obj in events:
-            if kind == 0:
-                assert isinstance(obj, Acquisition)
-                pool_qty += obj.quantity
-                pool_cost += obj.cost_gbp
-            else:
-                assert isinstance(obj, Disposal)
-                cost = pool_cost * (obj.quantity / pool_qty)
-                results.append(
-                    DisposalResult(
-                        disposal=obj,
-                        matches=(Match(MatchRule.SECTION_104, obj.quantity, cost),),
-                    )
-                )
-                pool_qty -= obj.quantity
-                pool_cost -= cost
-
-        pools[asset] = PoolState(asset=asset, quantity=pool_qty, cost_gbp=pool_cost)
+        asset_results, pools[asset] = _match_asset(acqs, disps)
+        results.extend(asset_results)
 
     results.sort(key=lambda r: (r.disposal.date, r.disposal.asset))
     return MatchOutcome(disposals=tuple(results), pools=pools, flags=())
