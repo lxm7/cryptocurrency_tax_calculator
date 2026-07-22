@@ -5,9 +5,9 @@ Batch semantics: the engine sorts internally, so input order never changes the
 result. Decimal throughout — no floats, no epsilon fudging. Full precision is
 kept here; rounding happens only at the reporting boundary.
 
-Same-day and Section 104 pool paths are implemented. The 30-day (bed-and-
-breakfast) rule and pool-short handling arrive with the tests that demand them;
-the priority pipeline already has a labelled slot for the 30-day phase.
+The full HMRC priority pipeline is implemented: same-day → 30-day (bed-and-
+breakfast) → Section 104 pool, with a nil-cost SECTION_104_SHORT fallback and a
+flag when a disposal exceeds all known stock (incomplete acquisition history).
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ def _take(lot: _Lot, quantity: Decimal) -> Decimal:
 def _match_asset(
     acqs: list[Acquisition],
     disps: list[Disposal],
-) -> tuple[list[DisposalResult], PoolState]:
+) -> tuple[list[DisposalResult], PoolState, list[Flag]]:
     """Match one asset's disposals through the priority pipeline, returning the
     per-disposal working and the pool carried forward.
 
@@ -183,6 +183,7 @@ def _match_asset(
     # its leftover from the pool as it stood on its date.
     pool = _Lot(dt.date.min, _ZERO, _ZERO)
     next_lot = 0  # lots[:next_lot] have been poured into the pool
+    flags: list[Flag] = []
     for w in works:
         while next_lot < len(lots) and lots[next_lot].date < w.disposal.date:
             lot = lots[next_lot]
@@ -193,6 +194,25 @@ def _match_asset(
             qty = min(w.remaining, pool.quantity)
             w.matches.append(Match(MatchRule.SECTION_104, qty, _take(pool, qty)))
             w.remaining -= qty
+        if w.remaining > _ZERO:
+            # Disposal exceeds all known stock — incomplete acquisition history. Any
+            # pool part was matched above at real cost; the true excess has no cost
+            # basis, so it becomes a nil-cost SECTION_104_SHORT chunk (its full
+            # proceeds fall into the gain) and a flag warns the user to supply the
+            # missing earlier acquisitions to reduce it.
+            short_qty = w.remaining
+            w.matches.append(Match(MatchRule.SECTION_104_SHORT, short_qty, _ZERO))
+            w.remaining = _ZERO
+            flags.append(
+                Flag(
+                    code=MatchRule.SECTION_104_SHORT.name,
+                    asset=asset,
+                    message=(
+                        f"disposal on {w.disposal.date} of {short_qty} {asset} "
+                        f"exceeds available pool — cost basis missing (incomplete history?)"
+                    ),
+                )
+            )
 
     # Carry forward the pool plus any residual stock never drawn on (same-day and
     # 30-day leftovers, plus acquisitions after the last disposal).
@@ -201,7 +221,7 @@ def _match_asset(
         pool.cost_gbp += lot.cost_gbp
 
     results = [DisposalResult(disposal=w.disposal, matches=tuple(w.matches)) for w in works]
-    return results, PoolState(asset=asset, quantity=pool.quantity, cost_gbp=pool.cost_gbp)
+    return results, PoolState(asset=asset, quantity=pool.quantity, cost_gbp=pool.cost_gbp), flags
 
 
 def match_disposals(
@@ -212,12 +232,14 @@ def match_disposals(
     assets = sorted({a.asset for a in acquisitions} | {d.asset for d in disposals})
     results: list[DisposalResult] = []
     pools: dict[str, PoolState] = {}
+    flags: list[Flag] = []
 
     for asset in assets:
         acqs = [a for a in acquisitions if a.asset == asset]
         disps = [d for d in disposals if d.asset == asset]
-        asset_results, pools[asset] = _match_asset(acqs, disps)
+        asset_results, pools[asset], asset_flags = _match_asset(acqs, disps)
         results.extend(asset_results)
+        flags.extend(asset_flags)
 
     results.sort(key=lambda r: (r.disposal.date, r.disposal.asset))
-    return MatchOutcome(disposals=tuple(results), pools=pools, flags=())
+    return MatchOutcome(disposals=tuple(results), pools=pools, flags=tuple(flags))

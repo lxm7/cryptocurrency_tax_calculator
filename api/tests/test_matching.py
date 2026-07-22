@@ -405,6 +405,80 @@ def test_thirty_day_window_excludes_day_thirty_one() -> None:
     assert outcome.pools["BTC"].cost_gbp == Decimal("25000")
 
 
+def test_disposal_exceeding_pool_matches_available_then_flags_short() -> None:
+    """A disposal larger than all known stock draws the pool at real cost, then the
+    true excess becomes a nil-cost SECTION_104_SHORT chunk with a flag — the signal
+    that acquisition history is incomplete."""
+    acqs = [
+        Acquisition(
+            date=date(2023, 1, 1),
+            asset="BTC",
+            quantity=Decimal("1"),
+            cost_gbp=Decimal("10000"),  # only 1 BTC of known stock
+        )
+    ]
+    disps = [
+        Disposal(
+            date=date(2024, 1, 1),
+            asset="BTC",
+            quantity=Decimal("2"),  # 1 BTC more than the pool can supply
+            proceeds_gbp=Decimal("60000"),
+            fee_gbp=Decimal("0"),
+        )
+    ]
+
+    outcome = match_disposals(acqs, disps)
+
+    result = outcome.disposals[0]
+    assert [m.rule for m in result.matches] == [
+        MatchRule.SECTION_104,
+        MatchRule.SECTION_104_SHORT,
+    ]
+    assert result.matches[0].quantity == Decimal("1")
+    assert result.matches[0].cost_gbp == Decimal("10000")  # pool part at real cost
+    assert result.matches[1].quantity == Decimal("1")
+    assert result.matches[1].cost_gbp == Decimal("0")  # unknown chunk: nil cost
+    assert result.allowable_cost_gbp == Decimal("10000")
+    assert result.gain_gbp == Decimal("50000")  # 60000 − 10000 − 0
+
+    # pool emptied, nothing to carry forward
+    assert outcome.pools["BTC"].quantity == Decimal("0")
+    assert outcome.pools["BTC"].cost_gbp == Decimal("0")
+
+    # one short flag naming the affected asset
+    assert len(outcome.flags) == 1
+    assert outcome.flags[0].code == "SECTION_104_SHORT"
+    assert outcome.flags[0].asset == "BTC"
+
+
+def test_disposal_with_no_pool_is_entirely_short_at_nil_cost() -> None:
+    """A disposal with no matching acquisitions at all is one SECTION_104_SHORT
+    chunk at nil cost: the whole proceeds (less fee) are gain, and a flag fires."""
+    disps = [
+        Disposal(
+            date=date(2024, 1, 1),
+            asset="BTC",
+            quantity=Decimal("1"),
+            proceeds_gbp=Decimal("30000"),
+            fee_gbp=Decimal("100"),
+        )
+    ]
+
+    outcome = match_disposals([], disps)
+
+    result = outcome.disposals[0]
+    assert [m.rule for m in result.matches] == [MatchRule.SECTION_104_SHORT]
+    assert result.matches[0].quantity == Decimal("1")
+    assert result.matches[0].cost_gbp == Decimal("0")
+    assert result.gain_gbp == Decimal("29900")  # 30000 − 0 − 100 fee
+
+    assert outcome.pools["BTC"].quantity == Decimal("0")
+    assert outcome.pools["BTC"].cost_gbp == Decimal("0")
+    assert len(outcome.flags) == 1
+    assert outcome.flags[0].code == "SECTION_104_SHORT"
+    assert outcome.flags[0].asset == "BTC"
+
+
 def test_single_disposal_draws_all_three_rules_in_priority_order() -> None:
     """One disposal spanning same-day, 30-day and s104: each rule contributes one
     BTC at its own cost, reported same-day → 30-day → s104."""
