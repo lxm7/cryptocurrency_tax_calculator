@@ -580,3 +580,107 @@ def test_same_day_beats_thirty_day_for_a_contested_acquisition() -> None:
 
     assert outcome.pools["BTC"].quantity == Decimal("1")
     assert outcome.pools["BTC"].cost_gbp == Decimal("10000")
+
+
+def test_assets_are_matched_and_pooled_independently() -> None:
+    """Two assets with acquisitions and disposals on shared dates never cross-match:
+    each disposal draws only its own asset's stock at its own cost, and each asset
+    carries its own pool. A same-day BTC buy must not satisfy an ETH disposal."""
+    acqs = [
+        Acquisition(
+            date=date(2023, 1, 1),
+            asset="BTC",
+            quantity=Decimal("2"),
+            cost_gbp=Decimal("20000"),  # 10000 per BTC
+        ),
+        Acquisition(
+            date=date(2023, 1, 1),  # same date as the BTC buy — must not merge
+            asset="ETH",
+            quantity=Decimal("4"),
+            cost_gbp=Decimal("4000"),  # 1000 per ETH
+        ),
+    ]
+    disps = [
+        Disposal(
+            date=date(2024, 1, 1),
+            asset="BTC",
+            quantity=Decimal("1"),
+            proceeds_gbp=Decimal("15000"),
+            fee_gbp=Decimal("0"),
+        ),
+        Disposal(
+            date=date(2024, 1, 1),  # same date as the BTC disposal
+            asset="ETH",
+            quantity=Decimal("2"),
+            proceeds_gbp=Decimal("5000"),
+            fee_gbp=Decimal("0"),
+        ),
+    ]
+
+    outcome = match_disposals(acqs, disps)
+
+    by_asset = {r.disposal.asset: r for r in outcome.disposals}
+
+    # BTC drew only BTC cost, ETH only ETH cost — no blending across assets
+    assert [m.rule for m in by_asset["BTC"].matches] == [MatchRule.SECTION_104]
+    assert by_asset["BTC"].matches[0].cost_gbp == Decimal("10000")
+    assert by_asset["BTC"].gain_gbp == Decimal("5000")  # 15000 − 10000
+
+    assert [m.rule for m in by_asset["ETH"].matches] == [MatchRule.SECTION_104]
+    assert by_asset["ETH"].matches[0].cost_gbp == Decimal("2000")  # 2 * 1000
+    assert by_asset["ETH"].gain_gbp == Decimal("3000")  # 5000 − 2000
+
+    # each asset carries its own independent pool
+    assert outcome.pools["BTC"].quantity == Decimal("1")
+    assert outcome.pools["BTC"].cost_gbp == Decimal("10000")
+    assert outcome.pools["ETH"].quantity == Decimal("2")
+    assert outcome.pools["ETH"].cost_gbp == Decimal("2000")
+
+    assert outcome.flags == ()
+
+
+def test_short_flag_is_isolated_to_its_own_asset() -> None:
+    """A short on one asset flags only that asset and leaves the other's pool and
+    matches untouched — flags do not bleed across the asset partition."""
+    acqs = [
+        Acquisition(
+            date=date(2023, 1, 1),
+            asset="BTC",
+            quantity=Decimal("1"),
+            cost_gbp=Decimal("10000"),  # BTC fully covered
+        )
+        # no ETH acquisitions at all → the ETH disposal must go short
+    ]
+    disps = [
+        Disposal(
+            date=date(2024, 1, 1),
+            asset="ETH",
+            quantity=Decimal("1"),
+            proceeds_gbp=Decimal("5000"),
+            fee_gbp=Decimal("0"),
+        ),
+        Disposal(
+            date=date(2024, 6, 1),
+            asset="BTC",
+            quantity=Decimal("1"),
+            proceeds_gbp=Decimal("15000"),
+            fee_gbp=Decimal("0"),
+        ),
+    ]
+
+    outcome = match_disposals(acqs, disps)
+
+    by_asset = {r.disposal.asset: r for r in outcome.disposals}
+
+    # ETH is entirely short at nil cost; BTC matches its pool normally, no short
+    assert [m.rule for m in by_asset["ETH"].matches] == [MatchRule.SECTION_104_SHORT]
+    assert [m.rule for m in by_asset["BTC"].matches] == [MatchRule.SECTION_104]
+    assert by_asset["BTC"].matches[0].cost_gbp == Decimal("10000")
+
+    # exactly one flag, naming ETH — BTC is never flagged
+    assert len(outcome.flags) == 1
+    assert outcome.flags[0].code == "SECTION_104_SHORT"
+    assert outcome.flags[0].asset == "ETH"
+
+    assert outcome.pools["ETH"].quantity == Decimal("0")
+    assert outcome.pools["BTC"].quantity == Decimal("0")
