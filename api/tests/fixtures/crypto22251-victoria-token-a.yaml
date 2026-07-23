@@ -1,0 +1,21 @@
+# HMRC Cryptoassets Manual CRYPTO22251 — Section 104 pooling worked example.
+# "Victoria" / Token A. Figures verbatim from HMRC; dates pinned (HMRC uses 20XX
+# placeholders) so the disposal is after both buys and no buy lands in D+30 →
+# pure Section 104 path, no same-day / 30-day interaction.
+# All numbers are strings — the loader parses to Decimal and MUST reject bare floats.
+name: crypto22251-victoria-token-a
+ref: CRYPTO22251
+acquisitions:
+  - {date: 2018-01-01, asset: A, quantity: "100", cost_gbp: "1000"}
+  - {date: 2018-09-18, asset: A, quantity: "50",  cost_gbp: "125000"}
+disposals:
+  - {date: 2018-12-01, asset: A, quantity: "50", proceeds_gbp: "300000", fee_gbp: "0"}
+expect:
+  disposals:
+    - matches:
+        - {rule: SECTION_104, quantity: "50", cost_gbp: "42000"}   # 126000 * 50/150
+      allowable_cost_gbp: "42000"
+      gain_gbp: "258000"                                            # 300000 - 42000
+  pools:
+    - {asset: A, quantity: "100", cost_gbp: "84000"}                # 126000 - 42000
+  flags: []

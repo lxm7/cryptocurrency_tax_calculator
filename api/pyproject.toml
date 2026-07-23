@@ -18,6 +18,9 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "hypothesis>=6.160.0",
+    "pydantic>=2",
+    "pyyaml>=6",
+    "types-pyyaml>=6",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -32,7 +35,7 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 
 # Global strict for now — the codebase is just the engine. When web/tasks/ingest
 # arrive (step 4) they get per-module overrides that relax specific checks;
