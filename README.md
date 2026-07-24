@@ -8,6 +8,9 @@ treatment against cited HMRC guidance.
 ## Dev quickstart
 
 ```bash
+docker compose run --rm api alembic upgrade head
+
+
 uv sync --project api                 # provisions Python 3.13, installs dev deps
 uv run --project api pytest -q        # tests
 uv run --project api ruff check api   # lint
