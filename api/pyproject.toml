@@ -3,7 +3,15 @@ name = "taxcalc"
 version = "0.1.0"
 description = "UK crypto CGT calculation and reporting aid — deterministic engine + API"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "anthropic>=0.69",
+    "sqlalchemy[asyncio]>=2",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "pydantic-settings>=2",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -43,3 +51,10 @@ pythonpath = ["src", "tests"]
 [tool.mypy]
 python_version = "3.13"
 strict = true
+
+# engine/ (and future pricing/) stay fully strict. The full-stack modules relax
+# only `disallow_untyped_decorators` — FastAPI's route decorators are untyped and
+# trip strict mode; everything else stays strict.
+[[tool.mypy.overrides]]
+module = ["taxcalc.web.*", "taxcalc.db.*"]
+disallow_untyped_decorators = false
